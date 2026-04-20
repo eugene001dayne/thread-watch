@@ -1,0 +1,11 @@
+{
+  "name": "threadwatch",
+  "version": "0.1.0",
+  "description": "Cross-layer pipeline vigilance for the Thread Suite.",
+  "main": "index.js",
+  "dependencies": {
+    "node-fetch": "^2.6.9"
+  },
+  "author": "Eugene Dayne Mawuli",
+  "license": "Apache-2.0"
+}
