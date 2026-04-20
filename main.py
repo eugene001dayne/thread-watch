@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import httpx
 import os
 import math
@@ -26,7 +26,7 @@ def get_client():
 app = FastAPI(
     title="ThreadWatch",
     description="Cross-layer pipeline vigilance for the Thread Suite.",
-    version="0.1.0"
+    version="0.2.0"
 )
 
 app.add_middleware(
@@ -186,13 +186,118 @@ def update_baselines(source_tool: str, metrics: Dict[str, float]):
         finally:
             client.close()
 
-# ─── Core endpoints ───────────────────────────────────────────────────────────
+# ─── Anomaly detection ────────────────────────────────────────────────────────
+
+MIN_SAMPLES_FOR_DETECTION = 5
+WARNING_SIGMA = 2.0
+CRITICAL_SIGMA = 3.0
+
+def detect_anomalies(source_tool: str, metrics: Dict[str, float]) -> List[Dict]:
+    detected = []
+    client = get_client()
+    try:
+        for metric_name, observed_value in metrics.items():
+            resp = client.get(
+                "/baselines",
+                params={
+                    "metric_name": f"eq.{metric_name}",
+                    "source_tool": f"eq.{source_tool}",
+                    "select": "*"
+                }
+            )
+            if resp.status_code != 200:
+                continue
+            rows = resp.json()
+            if not rows:
+                continue
+
+            baseline = rows[0]
+            sample_count = baseline.get("sample_count", 0)
+            if sample_count < MIN_SAMPLES_FOR_DETECTION:
+                continue
+
+            mean = baseline.get("mean_value", 0.0) or 0.0
+            std = baseline.get("std_deviation", 0.0) or 0.0
+
+            if std < 0.0001:
+                continue
+
+            sigma = abs(observed_value - mean) / std
+
+            if sigma >= WARNING_SIGMA:
+                severity = "critical" if sigma >= CRITICAL_SIGMA else "warning"
+
+                anomaly = {
+                    "source_tool": source_tool,
+                    "metric_name": metric_name,
+                    "observed_value": observed_value,
+                    "baseline_mean": mean,
+                    "baseline_std": std,
+                    "deviation_sigma": round(sigma, 3),
+                    "severity": severity,
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+
+                write_client = get_client()
+                try:
+                    write_client.post("/anomalies", json=anomaly)
+                finally:
+                    write_client.close()
+
+                detected.append({
+                    "metric": metric_name,
+                    "observed": observed_value,
+                    "mean": round(mean, 4),
+                    "sigma": round(sigma, 3),
+                    "severity": severity
+                })
+    finally:
+        client.close()
+
+    return detected
+
+# ─── Core ingestion ───────────────────────────────────────────────────────────
+
+def _ingest(source_tool: str, signal_type: str, payload: Dict) -> Dict:
+    client = get_client()
+    try:
+        resp = client.post("/pipeline_signals", json={
+            "source_tool": source_tool,
+            "signal_type": signal_type,
+            "payload": payload,
+            "recorded_at": datetime.now(timezone.utc).isoformat()
+        })
+        row = resp.json()[0] if resp.status_code in (200, 201) else {}
+    finally:
+        client.close()
+
+    metrics = extract_metrics(source_tool, payload)
+    anomalies = detect_anomalies(source_tool, metrics)
+    update_baselines(source_tool, metrics)
+
+    result = {
+        "received": True,
+        "signal_id": row.get("id"),
+        "source_tool": source_tool,
+        "signal_type": signal_type,
+        "metrics_tracked": list(metrics.keys()),
+        "anomalies_detected": anomalies,
+        "anomaly_count": len(anomalies)
+    }
+
+    if anomalies:
+        severities = [a["severity"] for a in anomalies]
+        result["highest_severity"] = "critical" if "critical" in severities else "warning"
+
+    return result
+
+# ─── Status endpoints ─────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
     return {
         "tool": "ThreadWatch",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "status": "running",
         "description": "Cross-layer pipeline vigilance for the Thread Suite.",
         "layers_watched": ["iron-thread", "testthread", "promptthread", "chainthread", "policythread"]
@@ -209,31 +314,7 @@ def health():
         db_ok = False
     return {"status": "ok" if db_ok else "degraded", "database": "connected" if db_ok else "unreachable"}
 
-# ─── Signal ingestion ─────────────────────────────────────────────────────────
-
-def _ingest(source_tool: str, signal_type: str, payload: Dict) -> Dict:
-    client = get_client()
-    try:
-        resp = client.post("/pipeline_signals", json={
-            "source_tool": source_tool,
-            "signal_type": signal_type,
-            "payload": payload,
-            "recorded_at": datetime.now(timezone.utc).isoformat()
-        })
-        row = resp.json()[0] if resp.status_code in (200, 201) else {}
-    finally:
-        client.close()
-
-    metrics = extract_metrics(source_tool, payload)
-    update_baselines(source_tool, metrics)
-
-    return {
-        "received": True,
-        "signal_id": row.get("id"),
-        "source_tool": source_tool,
-        "signal_type": signal_type,
-        "metrics_tracked": list(metrics.keys())
-    }
+# ─── Signal ingestion endpoints ───────────────────────────────────────────────
 
 @app.post("/signals/iron-thread")
 def ingest_iron_thread(signal: IronThreadSignal):
@@ -336,6 +417,77 @@ def recompute_baselines():
     client.close()
     return {"recomputed": True, "results": recomputed}
 
+# ─── Anomaly endpoints ────────────────────────────────────────────────────────
+
+@app.get("/anomalies")
+def list_anomalies(
+    tool: Optional[str] = Query(None),
+    severity: Optional[str] = Query(None),
+    resolved: Optional[bool] = Query(None),
+    limit: int = Query(50, ge=1, le=200)
+):
+    client = get_client()
+    params = {"select": "*", "order": "created_at.desc", "limit": str(limit)}
+    if tool:
+        params["source_tool"] = f"eq.{tool}"
+    if severity:
+        params["severity"] = f"eq.{severity}"
+    if resolved is not None:
+        params["resolved"] = f"eq.{str(resolved).lower()}"
+    resp = client.get("/anomalies", params=params)
+    client.close()
+    anomalies = resp.json() if resp.status_code == 200 else []
+    return {"anomalies": anomalies, "count": len(anomalies)}
+
+@app.patch("/anomalies/{anomaly_id}/resolve")
+def resolve_anomaly(anomaly_id: str):
+    client = get_client()
+    try:
+        resp = client.patch(
+            f"/anomalies?id=eq.{anomaly_id}",
+            json={"resolved": True, "resolved_at": datetime.now(timezone.utc).isoformat()}
+        )
+        rows = resp.json() if resp.status_code == 200 else []
+        if not rows:
+            return {"error": "anomaly not found"}
+        return {"resolved": True, "anomaly_id": anomaly_id}
+    finally:
+        client.close()
+
+@app.get("/anomalies/summary")
+def anomaly_summary():
+    client = get_client()
+    try:
+        all_resp = client.get("/anomalies", params={"select": "*", "resolved": "eq.false"})
+        all_anomalies = all_resp.json() if all_resp.status_code == 200 else []
+
+        by_tool = {}
+        by_severity = {"warning": 0, "critical": 0}
+        by_metric = {}
+
+        for a in all_anomalies:
+            tool = a.get("source_tool", "unknown")
+            sev = a.get("severity", "warning")
+            metric = a.get("metric_name", "unknown")
+
+            if tool not in by_tool:
+                by_tool[tool] = {"warning": 0, "critical": 0, "total": 0}
+            by_tool[tool][sev] += 1
+            by_tool[tool]["total"] += 1
+            by_severity[sev] += 1
+            by_metric[metric] = by_metric.get(metric, 0) + 1
+
+        most_flagged = sorted(by_metric.items(), key=lambda x: x[1], reverse=True)[:5]
+
+        return {
+            "total_unresolved": len(all_anomalies),
+            "by_severity": by_severity,
+            "by_tool": by_tool,
+            "most_flagged_metrics": [{"metric": m, "count": c} for m, c in most_flagged]
+        }
+    finally:
+        client.close()
+
 # ─── Dashboard ────────────────────────────────────────────────────────────────
 
 @app.get("/dashboard/stats")
@@ -345,6 +497,14 @@ def dashboard_stats():
 
     total_resp = client.get("/pipeline_signals", params={"select": "id"})
     total = len(total_resp.json()) if total_resp.status_code == 200 else 0
+
+    anomaly_resp = client.get("/anomalies", params={"select": "id", "resolved": "eq.false"})
+    total_anomalies = len(anomaly_resp.json()) if anomaly_resp.status_code == 200 else 0
+
+    critical_resp = client.get("/anomalies", params={
+        "select": "id", "resolved": "eq.false", "severity": "eq.critical"
+    })
+    critical_anomalies = len(critical_resp.json()) if critical_resp.status_code == 200 else 0
 
     per_tool = {}
     for tool in tools:
@@ -360,12 +520,24 @@ def dashboard_stats():
         baseline_resp = client.get("/baselines", params={"source_tool": f"eq.{tool}", "select": "id"})
         baseline_count = len(baseline_resp.json()) if baseline_resp.status_code == 200 else 0
 
+        tool_anomaly_resp = client.get("/anomalies", params={
+            "source_tool": f"eq.{tool}", "resolved": "eq.false", "select": "id"
+        })
+        tool_anomalies = len(tool_anomaly_resp.json()) if tool_anomaly_resp.status_code == 200 else 0
+
         per_tool[tool] = {
             "signal_count": count,
             "metrics_baselined": baseline_count,
+            "unresolved_anomalies": tool_anomalies,
             "last_signal_at": latest.get("recorded_at") if latest else None,
             "last_signal_type": latest.get("signal_type") if latest else None
         }
 
     client.close()
-    return {"total_signals": total, "tools_watched": len(tools), "per_tool": per_tool}
+    return {
+        "total_signals": total,
+        "tools_watched": len(tools),
+        "total_unresolved_anomalies": total_anomalies,
+        "critical_anomalies": critical_anomalies,
+        "per_tool": per_tool
+    }

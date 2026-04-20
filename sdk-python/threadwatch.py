@@ -101,3 +101,26 @@ class ThreadWatch:
         r = self.client.get("/health")
         r.raise_for_status()
         return r.json()
+
+def get_anomalies(self, tool: str = None, severity: str = None,
+                      resolved: bool = None, limit: int = 50):
+        params = {"limit": limit}
+        if tool:
+            params["tool"] = tool
+        if severity:
+            params["severity"] = severity
+        if resolved is not None:
+            params["resolved"] = str(resolved).lower()
+        r = self.client.get("/anomalies", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def resolve_anomaly(self, anomaly_id: str):
+        r = self.client.patch(f"/anomalies/{anomaly_id}/resolve")
+        r.raise_for_status()
+        return r.json()
+
+    def anomaly_summary(self):
+        r = self.client.get("/anomalies/summary")
+        r.raise_for_status()
+        return r.json()

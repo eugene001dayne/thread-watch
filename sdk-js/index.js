@@ -68,6 +68,22 @@ class ThreadWatch {
 
   stats() { return this._request("GET", "/dashboard/stats"); }
   health() { return this._request("GET", "/health"); }
+
+  getAnomalies({ tool = null, severity = null, resolved = null, limit = 50 } = {}) {
+    const params = new URLSearchParams({ limit });
+    if (tool) params.append("tool", tool);
+    if (severity) params.append("severity", severity);
+    if (resolved !== null) params.append("resolved", resolved);
+    return this._request("GET", `/anomalies?${params}`);
+  }
+
+  resolveAnomaly(anomalyId) {
+    return this._request("PATCH", `/anomalies/${anomalyId}/resolve`);
+  }
+
+  anomalySummary() {
+    return this._request("GET", "/anomalies/summary");
+  }
 }
 
 module.exports = ThreadWatch;
