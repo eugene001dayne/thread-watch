@@ -26,7 +26,7 @@ def get_client():
 app = FastAPI(
     title="ThreadWatch",
     description="Cross-layer pipeline vigilance for the Thread Suite.",
-    version="0.3.0"
+    version="0.4.0"
 )
 
 app.add_middleware(
@@ -87,6 +87,11 @@ class PolicyThreadSignal(BaseModel):
     escalated: Optional[bool] = False
     signal_type: Optional[str] = "policy_evaluation"
     metadata: Optional[Dict[str, Any]] = {}
+
+class WebhookCreate(BaseModel):
+    name: str
+    url: str
+    min_severity: Optional[str] = "warning"
 
 # ─── Metric extraction ────────────────────────────────────────────────────────
 
@@ -251,7 +256,6 @@ def diagnose(source_tool: str, metric_name: str,
                 "triggering multiple policies simultaneously — check for overlapping rules."
             )
 
-    # Generic fallbacks
     if metric_name == "latency_ms" and direction == "high":
         return "performance_degradation", (
             f"Latency spike detected on {source_tool}. Check service health "
@@ -263,6 +267,68 @@ def diagnose(source_tool: str, metric_name: str,
         f"Observed {observed_value:.4f} vs baseline mean {baseline_mean:.4f}. "
         "Investigate recent changes to this layer."
     )
+
+# ─── Webhook firing ───────────────────────────────────────────────────────────
+
+def fire_webhooks(anomaly: Dict):
+    severity = anomaly.get("severity", "warning")
+    severity_rank = {"warning": 1, "critical": 2}
+
+    client = get_client()
+    try:
+        resp = client.get("/webhooks", params={"active": "eq.true", "select": "*"})
+        webhooks = resp.json() if resp.status_code == 200 else []
+    finally:
+        client.close()
+
+    payload = {
+        "event": "threadwatch.anomaly",
+        "source_tool": anomaly.get("source_tool"),
+        "metric_name": anomaly.get("metric_name"),
+        "observed_value": anomaly.get("observed_value"),
+        "baseline_mean": anomaly.get("baseline_mean"),
+        "deviation_sigma": anomaly.get("deviation_sigma"),
+        "severity": severity,
+        "diagnosis_category": anomaly.get("diagnosis_category"),
+        "recommended_action": anomaly.get("recommended_action"),
+        "anomaly_id": anomaly.get("anomaly_id"),
+        "fired_at": datetime.now(timezone.utc).isoformat()
+    }
+
+    fired_url = None
+    for webhook in webhooks:
+        min_sev = webhook.get("min_severity", "warning")
+        if severity_rank.get(severity, 0) >= severity_rank.get(min_sev, 0):
+            try:
+                with httpx.Client(timeout=5.0) as wh_client:
+                    wh_client.post(webhook["url"], json=payload)
+                fired_url = webhook["url"]
+            except Exception:
+                pass
+
+    return fired_url
+
+# ─── Watch alert logging ──────────────────────────────────────────────────────
+
+def log_watch_alert(anomaly: Dict, webhook_url: Optional[str]):
+    client = get_client()
+    try:
+        client.post("/watch_alerts", json={
+            "anomaly_id": anomaly.get("anomaly_id"),
+            "source_tool": anomaly.get("source_tool"),
+            "metric_name": anomaly.get("metric_name"),
+            "severity": anomaly.get("severity"),
+            "diagnosis_category": anomaly.get("diagnosis_category"),
+            "recommended_action": anomaly.get("recommended_action"),
+            "deviation_sigma": anomaly.get("sigma"),
+            "observed_value": anomaly.get("observed"),
+            "baseline_mean": anomaly.get("mean"),
+            "webhook_fired": webhook_url is not None,
+            "webhook_url": webhook_url,
+            "fired_at": datetime.now(timezone.utc).isoformat()
+        })
+    finally:
+        client.close()
 
 # ─── Baseline update (Welford's online algorithm) ─────────────────────────────
 
@@ -379,16 +445,26 @@ def detect_anomalies(source_tool: str, metrics: Dict[str, float]) -> List[Dict]:
                 finally:
                     write_client.close()
 
-                detected.append({
+                anomaly_out = {
                     "anomaly_id": written.get("id"),
+                    "source_tool": source_tool,
+                    "metric_name": metric_name,
                     "metric": metric_name,
                     "observed": observed_value,
+                    "observed_value": observed_value,
                     "mean": round(mean, 4),
+                    "baseline_mean": round(mean, 4),
                     "sigma": round(sigma, 3),
+                    "deviation_sigma": round(sigma, 3),
                     "severity": severity,
                     "diagnosis_category": category,
                     "recommended_action": recommended_action
-                })
+                }
+
+                webhook_url = fire_webhooks(anomaly_out)
+                log_watch_alert(anomaly_out, webhook_url)
+
+                detected.append(anomaly_out)
     finally:
         client.close()
 
@@ -426,8 +502,7 @@ def _ingest(source_tool: str, signal_type: str, payload: Dict) -> Dict:
     if anomalies:
         severities = [a["severity"] for a in anomalies]
         result["highest_severity"] = "critical" if "critical" in severities else "warning"
-        categories = list({a["diagnosis_category"] for a in anomalies})
-        result["diagnosis_categories"] = categories
+        result["diagnosis_categories"] = list({a["diagnosis_category"] for a in anomalies})
 
     return result
 
@@ -437,7 +512,7 @@ def _ingest(source_tool: str, signal_type: str, payload: Dict) -> Dict:
 def root():
     return {
         "tool": "ThreadWatch",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "status": "running",
         "description": "Cross-layer pipeline vigilance for the Thread Suite.",
         "layers_watched": ["iron-thread", "testthread", "promptthread", "chainthread", "policythread"]
@@ -669,10 +744,7 @@ def list_diagnoses(
 def get_diagnosis(anomaly_id: str):
     client = get_client()
     try:
-        resp = client.get(
-            "/anomalies",
-            params={"id": f"eq.{anomaly_id}", "select": "*"}
-        )
+        resp = client.get("/anomalies", params={"id": f"eq.{anomaly_id}", "select": "*"})
         rows = resp.json() if resp.status_code == 200 else []
         if not rows:
             return {"error": "anomaly not found"}
@@ -694,6 +766,87 @@ def get_diagnosis(anomaly_id: str):
     finally:
         client.close()
 
+# ─── Webhook endpoints ────────────────────────────────────────────────────────
+
+@app.post("/webhooks")
+def create_webhook(webhook: WebhookCreate):
+    if webhook.min_severity not in ("warning", "critical"):
+        return {"error": "min_severity must be warning or critical"}
+    client = get_client()
+    try:
+        resp = client.post("/webhooks", json={
+            "name": webhook.name,
+            "url": webhook.url,
+            "min_severity": webhook.min_severity,
+            "active": True
+        })
+        rows = resp.json() if resp.status_code in (200, 201) else []
+        return rows[0] if rows else {"error": "failed to create webhook"}
+    finally:
+        client.close()
+
+@app.get("/webhooks")
+def list_webhooks():
+    client = get_client()
+    try:
+        resp = client.get("/webhooks", params={"select": "*", "order": "created_at.desc"})
+        webhooks = resp.json() if resp.status_code == 200 else []
+        return {"webhooks": webhooks, "count": len(webhooks)}
+    finally:
+        client.close()
+
+@app.delete("/webhooks/{webhook_id}")
+def delete_webhook(webhook_id: str):
+    client = get_client()
+    try:
+        resp = client.patch(
+            f"/webhooks?id=eq.{webhook_id}",
+            json={"active": False}
+        )
+        rows = resp.json() if resp.status_code == 200 else []
+        if not rows:
+            return {"error": "webhook not found"}
+        return {"deactivated": True, "webhook_id": webhook_id}
+    finally:
+        client.close()
+
+# ─── Watch alert endpoints ────────────────────────────────────────────────────
+
+@app.get("/watch-alerts")
+def list_watch_alerts(
+    tool: Optional[str] = Query(None),
+    severity: Optional[str] = Query(None),
+    acknowledged: Optional[bool] = Query(None),
+    limit: int = Query(50, ge=1, le=200)
+):
+    client = get_client()
+    params = {"select": "*", "order": "fired_at.desc", "limit": str(limit)}
+    if tool:
+        params["source_tool"] = f"eq.{tool}"
+    if severity:
+        params["severity"] = f"eq.{severity}"
+    if acknowledged is not None:
+        params["acknowledged"] = f"eq.{str(acknowledged).lower()}"
+    resp = client.get("/watch_alerts", params=params)
+    client.close()
+    alerts = resp.json() if resp.status_code == 200 else []
+    return {"alerts": alerts, "count": len(alerts)}
+
+@app.patch("/watch-alerts/{alert_id}/acknowledge")
+def acknowledge_alert(alert_id: str):
+    client = get_client()
+    try:
+        resp = client.patch(
+            f"/watch_alerts?id=eq.{alert_id}",
+            json={"acknowledged": True, "acknowledged_at": datetime.now(timezone.utc).isoformat()}
+        )
+        rows = resp.json() if resp.status_code == 200 else []
+        if not rows:
+            return {"error": "alert not found"}
+        return {"acknowledged": True, "alert_id": alert_id}
+    finally:
+        client.close()
+
 # ─── Dashboard ────────────────────────────────────────────────────────────────
 
 @app.get("/dashboard/stats")
@@ -711,6 +864,9 @@ def dashboard_stats():
         "select": "id", "resolved": "eq.false", "severity": "eq.critical"
     })
     critical_anomalies = len(critical_resp.json()) if critical_resp.status_code == 200 else 0
+
+    alert_resp = client.get("/watch_alerts", params={"select": "id", "acknowledged": "eq.false"})
+    unacked_alerts = len(alert_resp.json()) if alert_resp.status_code == 200 else 0
 
     category_resp = client.get("/anomalies", params={
         "select": "diagnosis_category", "resolved": "eq.false"
@@ -756,6 +912,7 @@ def dashboard_stats():
         "tools_watched": len(tools),
         "total_unresolved_anomalies": total_anomalies,
         "critical_anomalies": critical_anomalies,
+        "unacknowledged_alerts": unacked_alerts,
         "top_diagnosis_categories": [{"category": c, "count": n} for c, n in top_categories],
         "per_tool": per_tool
     }

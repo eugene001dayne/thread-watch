@@ -97,6 +97,30 @@ class ThreadWatch {
   getDiagnosis(anomalyId) {
     return this._request("GET", `/diagnoses/${anomalyId}`);
   }
+
+createWebhook(name, url, minSeverity = "warning") {
+    return this._request("POST", "/webhooks", { name, url, min_severity: minSeverity });
+  }
+
+  listWebhooks() {
+    return this._request("GET", "/webhooks");
+  }
+
+  deleteWebhook(webhookId) {
+    return this._request("DELETE", `/webhooks/${webhookId}`);
+  }
+
+  getWatchAlerts({ tool = null, severity = null, acknowledged = null, limit = 50 } = {}) {
+    const params = new URLSearchParams({ limit });
+    if (tool) params.append("tool", tool);
+    if (severity) params.append("severity", severity);
+    if (acknowledged !== null) params.append("acknowledged", acknowledged);
+    return this._request("GET", `/watch-alerts?${params}`);
+  }
+
+  acknowledgeAlert(alertId) {
+    return this._request("PATCH", `/watch-alerts/${alertId}/acknowledge`);
+  }
 }
 
 module.exports = ThreadWatch;

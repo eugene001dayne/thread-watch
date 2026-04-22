@@ -102,7 +102,7 @@ class ThreadWatch:
         r.raise_for_status()
         return r.json()
 
-def get_anomalies(self, tool: str = None, severity: str = None,
+    def get_anomalies(self, tool: str = None, severity: str = None,
                       resolved: bool = None, limit: int = 50):
         params = {"limit": limit}
         if tool:
@@ -125,7 +125,7 @@ def get_anomalies(self, tool: str = None, severity: str = None,
         r.raise_for_status()
         return r.json()
 
-def get_diagnoses(self, tool: str = None, category: str = None,
+    def get_diagnoses(self, tool: str = None, category: str = None,
                       severity: str = None, resolved: bool = None, limit: int = 50):
         params = {"limit": limit}
         if tool: params["tool"] = tool
@@ -138,5 +138,37 @@ def get_diagnoses(self, tool: str = None, category: str = None,
 
     def get_diagnosis(self, anomaly_id: str):
         r = self.client.get(f"/diagnoses/{anomaly_id}")
+        r.raise_for_status()
+        return r.json()
+
+    def create_webhook(self, name: str, url: str, min_severity: str = "warning"):
+        r = self.client.post("/webhooks", json={
+            "name": name, "url": url, "min_severity": min_severity
+        })
+        r.raise_for_status()
+        return r.json()
+
+    def list_webhooks(self):
+        r = self.client.get("/webhooks")
+        r.raise_for_status()
+        return r.json()
+
+    def delete_webhook(self, webhook_id: str):
+        r = self.client.delete(f"/webhooks/{webhook_id}")
+        r.raise_for_status()
+        return r.json()
+
+    def get_watch_alerts(self, tool: str = None, severity: str = None,
+                         acknowledged: bool = None, limit: int = 50):
+        params = {"limit": limit}
+        if tool: params["tool"] = tool
+        if severity: params["severity"] = severity
+        if acknowledged is not None: params["acknowledged"] = str(acknowledged).lower()
+        r = self.client.get("/watch-alerts", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def acknowledge_alert(self, alert_id: str):
+        r = self.client.patch(f"/watch-alerts/{alert_id}/acknowledge")
         r.raise_for_status()
         return r.json()
