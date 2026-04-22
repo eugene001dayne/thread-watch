@@ -124,3 +124,19 @@ def get_anomalies(self, tool: str = None, severity: str = None,
         r = self.client.get("/anomalies/summary")
         r.raise_for_status()
         return r.json()
+
+def get_diagnoses(self, tool: str = None, category: str = None,
+                      severity: str = None, resolved: bool = None, limit: int = 50):
+        params = {"limit": limit}
+        if tool: params["tool"] = tool
+        if category: params["category"] = category
+        if severity: params["severity"] = severity
+        if resolved is not None: params["resolved"] = str(resolved).lower()
+        r = self.client.get("/diagnoses", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def get_diagnosis(self, anomaly_id: str):
+        r = self.client.get(f"/diagnoses/{anomaly_id}")
+        r.raise_for_status()
+        return r.json()

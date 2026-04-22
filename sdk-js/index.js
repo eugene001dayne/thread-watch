@@ -84,6 +84,19 @@ class ThreadWatch {
   anomalySummary() {
     return this._request("GET", "/anomalies/summary");
   }
+
+  getDiagnoses({ tool = null, category = null, severity = null, resolved = null, limit = 50 } = {}) {
+    const params = new URLSearchParams({ limit });
+    if (tool) params.append("tool", tool);
+    if (category) params.append("category", category);
+    if (severity) params.append("severity", severity);
+    if (resolved !== null) params.append("resolved", resolved);
+    return this._request("GET", `/diagnoses?${params}`);
+  }
+
+  getDiagnosis(anomalyId) {
+    return this._request("GET", `/diagnoses/${anomalyId}`);
+  }
 }
 
 module.exports = ThreadWatch;

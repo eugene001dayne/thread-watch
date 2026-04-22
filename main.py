@@ -26,7 +26,7 @@ def get_client():
 app = FastAPI(
     title="ThreadWatch",
     description="Cross-layer pipeline vigilance for the Thread Suite.",
-    version="0.2.0"
+    version="0.3.0"
 )
 
 app.add_middleware(
@@ -135,6 +135,135 @@ def extract_metrics(source_tool: str, payload: Dict) -> Dict[str, float]:
 
     return metrics
 
+# ─── Diagnosis engine ─────────────────────────────────────────────────────────
+
+def diagnose(source_tool: str, metric_name: str,
+             observed_value: float, baseline_mean: float) -> tuple:
+    direction = "high" if observed_value > baseline_mean else "low"
+
+    if source_tool == "iron-thread":
+        if metric_name == "pass_rate" and direction == "low":
+            return "structural_degradation", (
+                "AI outputs are failing structure validation more than usual. "
+                "Check if the upstream model changed or if the prompt was modified recently."
+            )
+        if metric_name == "confidence_score" and direction == "low":
+            return "structural_degradation", (
+                "Validated outputs are statistically anomalous. Values are passing schema "
+                "but look different from historical norms — possible model drift or data shift."
+            )
+        if metric_name == "latency_ms" and direction == "high":
+            return "performance_degradation", (
+                "Iron-Thread validation latency is spiking. Check if auto-correction is "
+                "triggering more frequently or if the Gemini API is responding slowly."
+            )
+
+    elif source_tool == "testthread":
+        if metric_name == "pass_rate" and direction == "low":
+            return "behavioral_drift", (
+                "Agent is failing more behavioral tests than baseline. Run the full test suite "
+                "manually and check for recent prompt or model changes."
+            )
+        if metric_name == "regression_rate" and direction == "high":
+            return "behavioral_drift", (
+                "Regression detected — agent is performing worse than a previous run. "
+                "Compare current and previous test results to isolate newly failing cases."
+            )
+        if metric_name == "drift_rate" and direction == "high":
+            return "behavioral_drift", (
+                "Production monitoring is detecting behavioral drift. The agent's live "
+                "behavior has diverged from its tested behavior. Review recent interactions."
+            )
+        if metric_name == "latency_ms" and direction == "high":
+            return "performance_degradation", (
+                "Agent response latency is spiking. Check if the agent's underlying model "
+                "or external tools are experiencing delays."
+            )
+
+    elif source_tool == "promptthread":
+        if metric_name == "pass_rate" and direction == "low":
+            return "prompt_degradation", (
+                "Prompt pass rate has dropped. Check if the prompt was recently modified "
+                "or if the model is behaving differently on this prompt version."
+            )
+        if metric_name == "alert_rate" and direction == "high":
+            return "prompt_degradation", (
+                "PromptThread alerts are firing more than usual. Check alert configs for "
+                "pass rate, latency, and cost thresholds — one may have been crossed repeatedly."
+            )
+        if metric_name == "drift_rate" and direction == "high":
+            return "prompt_degradation", (
+                "World drift detected — the model may now be wrong about facts this prompt "
+                "relies on. Review drift anchor results in PromptThread dashboard."
+            )
+        if metric_name == "cost_usd" and direction == "high":
+            return "cost_spike", (
+                "Prompt cost per run is spiking. Check if outputs are getting longer, "
+                "if token usage has increased, or if the model being called has changed."
+            )
+        if metric_name == "latency_ms" and direction == "high":
+            return "performance_degradation", (
+                "Prompt execution latency is spiking. Check model provider status "
+                "and whether prompt complexity has increased recently."
+            )
+
+    elif source_tool == "chainthread":
+        if metric_name == "contract_pass_rate" and direction == "low":
+            return "coordination_failure", (
+                "Agent handoffs are failing contract validation more than usual. Check which "
+                "agent pairs are failing and review their contract field requirements."
+            )
+        if metric_name == "hitl_rate" and direction == "high":
+            return "coordination_failure", (
+                "More handoffs are escalating to human review than baseline. An upstream agent "
+                "may be producing outputs that consistently fail contract assertions."
+            )
+        if metric_name == "pii_rate" and direction == "high":
+            return "coordination_failure", (
+                "PII is being detected in handoff payloads more frequently than usual. "
+                "Review which agents are handling sensitive data and verify redaction is configured."
+            )
+        if metric_name == "confidence" and direction == "low":
+            return "coordination_failure", (
+                "Handoff confidence scores are dropping. Check if confidence decay across hops "
+                "is compounding, or if source agents are returning lower-quality outputs."
+            )
+
+    elif source_tool == "policythread":
+        if metric_name == "pass_rate" and direction == "low":
+            return "compliance_breach", (
+                "More production interactions are violating policies than baseline. Review "
+                "recent violations in PolicyThread and check if a new interaction pattern has emerged."
+            )
+        if metric_name == "critical_rate" and direction == "high":
+            return "compliance_breach", (
+                "Critical severity policy violations are spiking. Immediate review required — "
+                "check PolicyThread violations filtered by severity: critical."
+            )
+        if metric_name == "escalation_rate" and direction == "high":
+            return "compliance_breach", (
+                "Policy escalations are firing more than usual. Adaptive escalation rules may "
+                "be triggering repeatedly — review PolicyThread escalation configs."
+            )
+        if metric_name == "violation_count" and direction == "high":
+            return "compliance_breach", (
+                "Violation count per interaction is rising. A single interaction may be "
+                "triggering multiple policies simultaneously — check for overlapping rules."
+            )
+
+    # Generic fallbacks
+    if metric_name == "latency_ms" and direction == "high":
+        return "performance_degradation", (
+            f"Latency spike detected on {source_tool}. Check service health "
+            "and upstream dependencies for slowdowns."
+        )
+
+    return "unknown_anomaly", (
+        f"Anomaly detected on {source_tool}/{metric_name}. "
+        f"Observed {observed_value:.4f} vs baseline mean {baseline_mean:.4f}. "
+        "Investigate recent changes to this layer."
+    )
+
 # ─── Baseline update (Welford's online algorithm) ─────────────────────────────
 
 def update_baselines(source_tool: str, metrics: Dict[str, float]):
@@ -186,7 +315,7 @@ def update_baselines(source_tool: str, metrics: Dict[str, float]):
         finally:
             client.close()
 
-# ─── Anomaly detection ────────────────────────────────────────────────────────
+# ─── Anomaly detection + diagnosis ───────────────────────────────────────────
 
 MIN_SAMPLES_FOR_DETECTION = 5
 WARNING_SIGMA = 2.0
@@ -226,8 +355,11 @@ def detect_anomalies(source_tool: str, metrics: Dict[str, float]) -> List[Dict]:
 
             if sigma >= WARNING_SIGMA:
                 severity = "critical" if sigma >= CRITICAL_SIGMA else "warning"
+                category, recommended_action = diagnose(
+                    source_tool, metric_name, observed_value, mean
+                )
 
-                anomaly = {
+                anomaly_record = {
                     "source_tool": source_tool,
                     "metric_name": metric_name,
                     "observed_value": observed_value,
@@ -235,21 +367,27 @@ def detect_anomalies(source_tool: str, metrics: Dict[str, float]) -> List[Dict]:
                     "baseline_std": std,
                     "deviation_sigma": round(sigma, 3),
                     "severity": severity,
+                    "diagnosis_category": category,
+                    "recommended_action": recommended_action,
                     "created_at": datetime.now(timezone.utc).isoformat()
                 }
 
                 write_client = get_client()
                 try:
-                    write_client.post("/anomalies", json=anomaly)
+                    write_resp = write_client.post("/anomalies", json=anomaly_record)
+                    written = write_resp.json()[0] if write_resp.status_code in (200, 201) else {}
                 finally:
                     write_client.close()
 
                 detected.append({
+                    "anomaly_id": written.get("id"),
                     "metric": metric_name,
                     "observed": observed_value,
                     "mean": round(mean, 4),
                     "sigma": round(sigma, 3),
-                    "severity": severity
+                    "severity": severity,
+                    "diagnosis_category": category,
+                    "recommended_action": recommended_action
                 })
     finally:
         client.close()
@@ -288,6 +426,8 @@ def _ingest(source_tool: str, signal_type: str, payload: Dict) -> Dict:
     if anomalies:
         severities = [a["severity"] for a in anomalies]
         result["highest_severity"] = "critical" if "critical" in severities else "warning"
+        categories = list({a["diagnosis_category"] for a in anomalies})
+        result["diagnosis_categories"] = categories
 
     return result
 
@@ -297,7 +437,7 @@ def _ingest(source_tool: str, signal_type: str, payload: Dict) -> Dict:
 def root():
     return {
         "tool": "ThreadWatch",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "status": "running",
         "description": "Cross-layer pipeline vigilance for the Thread Suite.",
         "layers_watched": ["iron-thread", "testthread", "promptthread", "chainthread", "policythread"]
@@ -377,7 +517,8 @@ def recompute_baselines():
     for tool in tools:
         resp = client.get(
             "/pipeline_signals",
-            params={"source_tool": f"eq.{tool}", "order": "recorded_at.desc", "limit": "100", "select": "payload"}
+            params={"source_tool": f"eq.{tool}", "order": "recorded_at.desc",
+                    "limit": "100", "select": "payload"}
         )
         if resp.status_code != 200:
             recomputed[tool] = {"error": "fetch failed"}
@@ -464,11 +605,13 @@ def anomaly_summary():
         by_tool = {}
         by_severity = {"warning": 0, "critical": 0}
         by_metric = {}
+        by_category = {}
 
         for a in all_anomalies:
             tool = a.get("source_tool", "unknown")
             sev = a.get("severity", "warning")
             metric = a.get("metric_name", "unknown")
+            category = a.get("diagnosis_category", "unknown")
 
             if tool not in by_tool:
                 by_tool[tool] = {"warning": 0, "critical": 0, "total": 0}
@@ -476,14 +619,77 @@ def anomaly_summary():
             by_tool[tool]["total"] += 1
             by_severity[sev] += 1
             by_metric[metric] = by_metric.get(metric, 0) + 1
+            by_category[category] = by_category.get(category, 0) + 1
 
         most_flagged = sorted(by_metric.items(), key=lambda x: x[1], reverse=True)[:5]
+        top_categories = sorted(by_category.items(), key=lambda x: x[1], reverse=True)
 
         return {
             "total_unresolved": len(all_anomalies),
             "by_severity": by_severity,
             "by_tool": by_tool,
+            "by_diagnosis_category": by_category,
+            "top_diagnosis_categories": [{"category": c, "count": n} for c, n in top_categories],
             "most_flagged_metrics": [{"metric": m, "count": c} for m, c in most_flagged]
+        }
+    finally:
+        client.close()
+
+# ─── Diagnosis endpoints ──────────────────────────────────────────────────────
+
+@app.get("/diagnoses")
+def list_diagnoses(
+    tool: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    severity: Optional[str] = Query(None),
+    resolved: Optional[bool] = Query(None),
+    limit: int = Query(50, ge=1, le=200)
+):
+    client = get_client()
+    params = {
+        "select": "*",
+        "order": "created_at.desc",
+        "limit": str(limit),
+        "diagnosis_category": "not.is.null"
+    }
+    if tool:
+        params["source_tool"] = f"eq.{tool}"
+    if category:
+        params["diagnosis_category"] = f"eq.{category}"
+    if severity:
+        params["severity"] = f"eq.{severity}"
+    if resolved is not None:
+        params["resolved"] = f"eq.{str(resolved).lower()}"
+    resp = client.get("/anomalies", params=params)
+    client.close()
+    diagnoses = resp.json() if resp.status_code == 200 else []
+    return {"diagnoses": diagnoses, "count": len(diagnoses)}
+
+@app.get("/diagnoses/{anomaly_id}")
+def get_diagnosis(anomaly_id: str):
+    client = get_client()
+    try:
+        resp = client.get(
+            "/anomalies",
+            params={"id": f"eq.{anomaly_id}", "select": "*"}
+        )
+        rows = resp.json() if resp.status_code == 200 else []
+        if not rows:
+            return {"error": "anomaly not found"}
+        a = rows[0]
+        return {
+            "anomaly_id": a.get("id"),
+            "source_tool": a.get("source_tool"),
+            "metric_name": a.get("metric_name"),
+            "observed_value": a.get("observed_value"),
+            "baseline_mean": a.get("baseline_mean"),
+            "baseline_std": a.get("baseline_std"),
+            "deviation_sigma": a.get("deviation_sigma"),
+            "severity": a.get("severity"),
+            "diagnosis_category": a.get("diagnosis_category"),
+            "recommended_action": a.get("recommended_action"),
+            "resolved": a.get("resolved"),
+            "created_at": a.get("created_at")
         }
     finally:
         client.close()
@@ -505,6 +711,17 @@ def dashboard_stats():
         "select": "id", "resolved": "eq.false", "severity": "eq.critical"
     })
     critical_anomalies = len(critical_resp.json()) if critical_resp.status_code == 200 else 0
+
+    category_resp = client.get("/anomalies", params={
+        "select": "diagnosis_category", "resolved": "eq.false"
+    })
+    category_counts = {}
+    if category_resp.status_code == 200:
+        for row in category_resp.json():
+            cat = row.get("diagnosis_category", "unknown")
+            if cat:
+                category_counts[cat] = category_counts.get(cat, 0) + 1
+    top_categories = sorted(category_counts.items(), key=lambda x: x[1], reverse=True)[:3]
 
     per_tool = {}
     for tool in tools:
@@ -539,5 +756,6 @@ def dashboard_stats():
         "tools_watched": len(tools),
         "total_unresolved_anomalies": total_anomalies,
         "critical_anomalies": critical_anomalies,
+        "top_diagnosis_categories": [{"category": c, "count": n} for c, n in top_categories],
         "per_tool": per_tool
     }
