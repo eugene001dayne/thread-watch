@@ -121,6 +121,28 @@ createWebhook(name, url, minSeverity = "warning") {
   acknowledgeAlert(alertId) {
     return this._request("PATCH", `/watch-alerts/${alertId}/acknowledge`);
   }
+
+  pollProviders() {
+    return this._request("POST", "/external-signals/poll");
+  }
+
+  createExternalSignal({ signalType, source, title, description = null,
+                         severity = null, status = null, externalId = null }) {
+    return this._request("POST", "/external-signals", {
+      signal_type: signalType, source, title, description,
+      severity, status, external_id: externalId
+    });
+  }
+
+  listExternalSignals({ source = null, limit = 50 } = {}) {
+    const params = new URLSearchParams({ limit });
+    if (source) params.append("source", source);
+    return this._request("GET", `/external-signals?${params}`);
+  }
+
+  correlate(windowHours = 2) {
+    return this._request("GET", `/external-signals/correlate?window_hours=${windowHours}`);
+  }
 }
 
 module.exports = ThreadWatch;

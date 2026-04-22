@@ -172,3 +172,32 @@ class ThreadWatch:
         r = self.client.patch(f"/watch-alerts/{alert_id}/acknowledge")
         r.raise_for_status()
         return r.json()
+
+    def poll_providers(self):
+        r = self.client.post("/external-signals/poll")
+        r.raise_for_status()
+        return r.json()
+
+    def create_external_signal(self, signal_type: str, source: str, title: str,
+                                description: str = None, severity: str = None,
+                                status: str = None, external_id: str = None):
+        r = self.client.post("/external-signals", json={
+            "signal_type": signal_type, "source": source, "title": title,
+            "description": description, "severity": severity,
+            "status": status, "external_id": external_id
+        })
+        r.raise_for_status()
+        return r.json()
+
+    def list_external_signals(self, source: str = None, limit: int = 50):
+        params = {"limit": limit}
+        if source: params["source"] = source
+        r = self.client.get("/external-signals", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def correlate(self, window_hours: int = 2):
+        r = self.client.get("/external-signals/correlate",
+                            params={"window_hours": window_hours})
+        r.raise_for_status()
+        return r.json()    
