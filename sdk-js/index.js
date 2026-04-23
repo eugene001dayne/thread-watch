@@ -143,6 +143,24 @@ createWebhook(name, url, minSeverity = "warning") {
   correlate(windowHours = 2) {
     return this._request("GET", `/external-signals/correlate?window_hours=${windowHours}`);
   }
+
+  crossToolCorrelate(windowMinutes = 60) {
+    return this._request("GET", `/correlate/cross-tool?window_minutes=${windowMinutes}`);
+  }
+
+  analyzeAnomaly(anomalyId) {
+    return this._request("POST", `/correlate/cross-tool/analyze?anomaly_id=${anomalyId}`);
+  }
+
+  listCausalChains({ resolved = null, limit = 50 } = {}) {
+    const params = new URLSearchParams({ limit });
+    if (resolved !== null) params.append("resolved", resolved);
+    return this._request("GET", `/causal-chains?${params}`);
+  }
+
+  pipelineHealth(windowHours = 1) {
+    return this._request("GET", `/pipeline/health?window_hours=${windowHours}`);
+  }
 }
 
 module.exports = ThreadWatch;

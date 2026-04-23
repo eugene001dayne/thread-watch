@@ -200,4 +200,30 @@ class ThreadWatch:
         r = self.client.get("/external-signals/correlate",
                             params={"window_hours": window_hours})
         r.raise_for_status()
-        return r.json()    
+        return r.json()
+
+    def cross_tool_correlate(self, window_minutes: int = 60):
+        r = self.client.get("/correlate/cross-tool",
+                            params={"window_minutes": window_minutes})
+        r.raise_for_status()
+        return r.json()
+
+    def analyze_anomaly(self, anomaly_id: str):
+        r = self.client.post(f"/correlate/cross-tool/analyze",
+                             params={"anomaly_id": anomaly_id})
+        r.raise_for_status()
+        return r.json()
+
+    def list_causal_chains(self, resolved: bool = None, limit: int = 50):
+        params = {"limit": limit}
+        if resolved is not None:
+            params["resolved"] = str(resolved).lower()
+        r = self.client.get("/causal-chains", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def pipeline_health(self, window_hours: int = 1):
+        r = self.client.get("/pipeline/health",
+                            params={"window_hours": window_hours})
+        r.raise_for_status()
+        return r.json()        

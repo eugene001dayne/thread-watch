@@ -1,6 +1,6 @@
 {
   "name": "threadwatch",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Cross-layer pipeline vigilance for the Thread Suite.",
   "main": "index.js",
   "dependencies": {
